@@ -1,0 +1,361 @@
+#!/usr/bin/env ruby
+
+require 'rubygems'
+require 'redis'
+require 'logger'
+require 'thor'
+
+$log = Logger.new(STDOUT)
+
+
+class RedisMMM < Thor
+  class Error < ::RuntimeError
+    def initialize(subject = nil)
+      @subject = subject
+    end
+    attr_reader :subject
+  end
+
+  class NoMaster < Error; end
+  class MoreThanOneMaster < Error; end
+  class CurrentMasterWrong < Error; end
+  class MasterOffline < Error; end
+  class SlaveOffline < Error; end
+  class SlaveWrongMaster < Error; end
+  class SlaveMasterLinkDown < Error; end
+  class SlaveOffline < Error; end
+
+
+
+  class Host
+    def initialize(name, cfg)
+      @name, @cfg = name, cfg
+    end
+
+    attr_reader :name
+
+    %w(address port ssh_user ssh_port).each do |m|
+      define_method(m) do
+        @cfg[m.to_sym]
+      end
+    end
+
+    def online?
+      state[:online]
+    end
+
+    def master?
+      online? && state[:role] == "master"
+    end
+
+    def slave?
+      !master?
+    end
+
+    def state
+      begin
+        info = redis.info
+
+        {
+          :online => true,
+          :role => info["role"],
+          :master_host => info["master_host"],
+          :master_port => info["master_port"],
+          :master_link_status => info["master_link_status"],
+          :master_last_io_seconds_ago => info["master_last_io_seconds_ago"]
+        }
+      rescue Errno::ECONNREFUSED
+        {
+          :online => false
+        }
+      end
+    end
+
+    def add_ip(ip, interface)
+      ssh("/sbin/ip addr add #{ip} dev #{interface}")
+    end
+
+    def remove_ip(ip, interface)
+      ssh("/sbin/ip addr del #{ip} dev #{interface}")
+    end
+
+    def slaveof(host)
+      if host.nil
+        host, port = "no", "one"
+      else
+        host, port = host.address, host.port
+      end
+
+      $log.info("#{name} is slave of #{host} #{port}")
+      redis.slaveof(host, port)
+    end
+
+
+    def to_s
+      self.name.to_s
+    end
+
+    protected
+
+    def redis
+      @redis ||= Redis.new(:host => address, :port => port)
+    end
+
+    def ssh(command)
+      cmd = "/usr/bin/ssh -p #{ssh_port} #{ssh_user}@#{address} -c \"sudo #{command}\""
+      $log.debug "Executing #{cmd}"
+      # `#{cmd}`
+    end
+
+  end
+
+
+
+  desc "mon", "Start the monitor"
+  def mon
+    init_state
+
+    loop do
+      $log.debug("Checking cluster status")
+      ensure_valid_cluster_status
+
+      sleep 2
+    end
+  end
+
+  desc "info [HOST]", "Get info about the host"
+  def info(name)
+    host = self.host(name)
+    info = host.state
+
+    puts "Info about #{host}"
+    if host.online?
+      puts "Current role: #{info[:role]}"
+      if host.slave?
+        puts "Current master: #{info[:master_host]}:#{info[:master_port]}"
+        puts "Link to master: #{info[:master_link_status].upcase}"
+      end
+    else
+      puts "Offline!"
+    end
+  end
+
+  desc "status", "Show the current cluster status"
+  def status
+    puts "Configured hosts"
+    hosts.each do |host|
+      puts "#{host}: #{host.online? ? "ONLINE" : "OFFLINE"} / #{host.master? ? "master" : "slave"}"
+    end
+  end
+
+  desc "set_master [HOST]", "Changes the master"
+  def set_master(host)
+    init_state
+    change_master_to(host)
+  end
+
+  protected
+
+  def init_state
+    @current_master = find_current_master
+    $log.info "current master is #{@current_master}"
+  end
+
+
+  def ensure_valid_cluster_status
+    begin
+      validate_cluster_state
+      $log.debug("Cluster OK")
+
+    rescue RedisMMM::NoMaster
+      $log.fatal("THERE IS NO MASTER!")
+      new_master = elect_new_master!
+      $log.error("New master elected: #{new_master.name}")
+      retry
+
+    rescue RedisMMM::MoreThanOneMaster
+      $log.error("More than one master detected: #{$!.subject.map(&:name).join(", ")}")
+
+      $log.error("Re-electing #{@current_master.name} as master...")
+      change_master_to(@current_master, true)
+
+      retry
+
+    rescue RedisMMM::CurrentMasterWrong
+      $log.error("The server I think of as master is not a master... re-trying...")
+      @current_master = find_current_master
+      retry
+
+    rescue RedisMMM::MasterOffline
+      $log.error("MASTER (#{@current_master}) OFFLINE!")
+      new_master = elect_new_master!
+      $log.error("New master elected: #{new_master}")
+      retry
+
+    rescue RedisMMM::SlaveWrongMaster
+      $log.error "slave #{$!.subject} has the wrong master"
+      $!.subject.slaveof(@current_master)
+      retry
+
+    rescue RedisMMM::SlaveMasterLinkDown
+    rescue RedisMMM::SlaveOffline
+    end
+  end
+
+  # validates the state of the cluster
+  # a cluster is valid iff:
+  #
+  # * there is exactly ONE master
+  # * @current_master actually IS the master
+  # * the master is available and responding
+  # * all other servers are slaves
+  # * all slaves are either offline or replicating with the master AND in sync with master
+  def validate_cluster_state
+    master_hosts = hosts.select(&:master?)
+    slave_hosts = hosts.select(&:slave?)
+
+    if master_hosts.count > 1
+      raise MoreThanOneMaster, master_hosts
+    end
+
+    if master_hosts.count == 0
+      raise NoMaster, master_hosts
+    end
+
+    unless master_hosts[0] == @current_master
+      raise CurrentMasterWrong
+    end
+
+    unless @current_master.online?
+      raise MasterOffline
+    end
+
+    master_address = @current_master.address
+    master_port = @current_master.port
+
+    slave_hosts.each do |host|
+      status = host.state
+
+      unless status[:online]
+        raise SlaveOffline, host
+      end
+
+      if status[:master_host] != master_address || status[:master_port] != master_port
+        raise SlaveWrongMaster, host
+      end
+
+      if status[:master_link_status] != 'up'
+        raise SlaveMasterLinkDown, host
+      end
+
+    end
+
+
+    return true
+  end
+
+
+  def change_master_to(name, force = false)
+    host = self.host(name)
+
+    current_master = find_current_master
+
+    if current_master == host && force == false
+      $log.warn "#{host.name} is already master"
+      return
+    end
+
+    $log.info "Changing master from #{@current_master.name} to #{host.name}"
+
+    # remove master ip from old master
+    remove_master_ip_from(@current_master)
+    # add master ip to new master
+    add_master_ip_to(host)
+    # let new master stop replication
+    host.slaveof(nil)
+
+    # make all non-master hosts SLAVEOF new master
+    master_host = host.address
+    master_port = host.port
+    each_host do |slave|
+      next if slave == host
+
+      if !slave.online?
+        $log.warn("Skipping #{slave.name}, it's offline")
+        next
+      end
+
+      slave.slaveof(host)
+    end
+
+    @current_master = host
+  end
+
+
+  # * checks the slaves for a slave which could possibly be the new master
+  # * changes the master to the found slave
+  # * returns the new master host
+  #
+  def elect_new_master!
+    new_master = hosts.find(&:online?)
+
+    change_master_to(new_master, true)
+    new_master
+  end
+
+  def remove_master_ip_from(host)
+    host.remove_ip(master_ip, cluster_interface)
+  end
+
+  def add_master_ip_to(host)
+    host.add_ip(master_ip, cluster_interface)
+  end
+
+
+  def config
+    {
+      :master_ip => "192.168.10.70/24",
+      :cluster_interface => "eth1",
+      :hosts => {
+        :db1 => { :address => "127.0.0.1", :port => "6380", :ssh_user => "admin", :ssh_port => 22277 },
+        :db2 => { :address => "127.0.0.1", :port => "6381", :ssh_user => "admin", :ssh_port => 22277 }
+      }
+    }
+  end
+
+  def master_ip; config[:master_ip]; end
+  def cluster_interface; config[:cluster_interface]; end
+
+
+  # returns the hostname of the redis host which currently is master
+  def find_current_master
+    hosts.find(&:master?)
+  end
+
+  def each_host
+    hosts.each do |host|
+      yield host
+    end
+  end
+
+  def hosts
+    host_objects.values
+  end
+
+
+  def host_objects
+    @host_objects ||= config[:hosts].keys.inject({}) do |hsh, hostname|
+      cfg = config[:hosts][hostname.to_sym]
+      hsh[hostname] = Host.new(hostname, cfg)
+      hsh
+    end
+  end
+
+
+  def host(name)
+    Host === name ? name : host_objects[name.to_sym]
+  end
+end
+
+RedisMMM.start
+

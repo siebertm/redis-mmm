@@ -1,0 +1,13 @@
+== Moving parts ==
+
+* redis_mmm_mond
+  checks connection to all hosts
+  checks replication state
+  assigns roles
+  emits SLAVEOF commands
+  connects via ssh to hosts and assigns the role ip's
+
+* redis_mmm_ctl
+  CLI
+  display cluster status
+  ability to change active master
