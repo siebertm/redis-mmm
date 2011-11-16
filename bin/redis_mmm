@@ -4,6 +4,7 @@ require 'rubygems'
 require 'redis'
 require 'logger'
 require 'thor'
+require 'parseconfig'
 
 $log = Logger.new(STDOUT)
 
@@ -36,7 +37,7 @@ class RedisMMM < Thor
 
     %w(address port ssh_user ssh_port).each do |m|
       define_method(m) do
-        @cfg[m.to_sym]
+        @cfg[m.to_s]
       end
     end
 
@@ -80,7 +81,7 @@ class RedisMMM < Thor
     end
 
     def slaveof(host)
-      if host.nil
+      if host.nil?
         host, port = "no", "one"
       else
         host, port = host.address, host.port
@@ -112,6 +113,7 @@ class RedisMMM < Thor
 
 
   desc "mon", "Start the monitor"
+  method_option :config, :default => "/etc/redis-mmm.conf", :required => true, :aliases => "-c"
   def mon
     init_state
 
@@ -124,6 +126,7 @@ class RedisMMM < Thor
   end
 
   desc "info [HOST]", "Get info about the host"
+  method_option :config, :default => "/etc/redis-mmm.conf", :required => true, :aliases => "-c"
   def info(name)
     host = self.host(name)
     info = host.state
@@ -141,14 +144,17 @@ class RedisMMM < Thor
   end
 
   desc "status", "Show the current cluster status"
+  method_option :config, :default => "/etc/redis-mmm.conf", :required => true, :aliases => "-c"
   def status
     puts "Configured hosts"
     hosts.each do |host|
       puts "#{host}: #{host.online? ? "ONLINE" : "OFFLINE"} / #{host.master? ? "master" : "slave"}"
+      puts hosts.inspect
     end
   end
 
   desc "set_master [HOST]", "Changes the master"
+  method_option :config, :default => "/etc/redis-mmm.conf", :required => true, :aliases => "-c"
   def set_master(host)
     init_state
     change_master_to(host)
@@ -313,18 +319,11 @@ class RedisMMM < Thor
 
 
   def config
-    {
-      :master_ip => "192.168.10.70/24",
-      :cluster_interface => "eth1",
-      :hosts => {
-        :db1 => { :address => "127.0.0.1", :port => "6380", :ssh_user => "admin", :ssh_port => 22277 },
-        :db2 => { :address => "127.0.0.1", :port => "6381", :ssh_user => "admin", :ssh_port => 22277 }
-      }
-    }
+    @config ||= ParseConfig.new(options.config)
   end
 
-  def master_ip; config[:master_ip]; end
-  def cluster_interface; config[:cluster_interface]; end
+  def master_ip; config.params[:master_ip]; end
+  def cluster_interface; config.params[:cluster_interface]; end
 
 
   # returns the hostname of the redis host which currently is master
@@ -344,9 +343,9 @@ class RedisMMM < Thor
 
 
   def host_objects
-    @host_objects ||= config[:hosts].keys.inject({}) do |hsh, hostname|
-      cfg = config[:hosts][hostname.to_sym]
-      hsh[hostname] = Host.new(hostname, cfg)
+    @host_objects ||= config.groups.inject({}) do |hsh, hostname|
+      cfg = config.params[hostname.to_s]
+      hsh[hostname.to_sym] = Host.new(hostname, cfg)
       hsh
     end
   end
