@@ -73,11 +73,12 @@ class RedisMMM < Thor
     end
 
     def add_ip(ip, interface)
-      ssh("/sbin/ip addr add #{ip} dev #{interface}")
+      $log.debug ssh("ip addr show #{interface} | grep #{ip} || sudo ip addr add #{ip} dev #{interface}")
+
     end
 
     def remove_ip(ip, interface)
-      ssh("/sbin/ip addr del #{ip} dev #{interface}")
+      $log.debug ssh("ip addr show #{interface} | grep #{ip} && sudo ip addr del #{ip} dev #{interface}")
     end
 
     def slaveof(host)
@@ -103,9 +104,9 @@ class RedisMMM < Thor
     end
 
     def ssh(command)
-      cmd = "/usr/bin/ssh -p #{ssh_port} #{ssh_user}@#{address} -c \"sudo #{command}\""
+      cmd = "/usr/bin/ssh -p #{ssh_port} #{ssh_user}@#{address} \"#{command}\""
       $log.debug "Executing #{cmd}"
-      # `#{cmd}`
+      `#{cmd}`
     end
 
   end
@@ -114,6 +115,9 @@ class RedisMMM < Thor
 
   desc "mon", "Start the monitor"
   method_option :config, :default => "/etc/redis-mmm.conf", :required => true, :aliases => "-c"
+  method_option :log, :type => :string
+  method_option :verbose, :type =>:boolean, :aliases => "-v"
+  method_option :pid, :type => :string
   def mon
     init_state
 
@@ -127,6 +131,7 @@ class RedisMMM < Thor
 
   desc "info [HOST]", "Get info about the host"
   method_option :config, :default => "/etc/redis-mmm.conf", :required => true, :aliases => "-c"
+  method_option :verbose, :type =>:boolean, :aliases => "-v"
   def info(name)
     host = self.host(name)
     info = host.state
@@ -145,16 +150,17 @@ class RedisMMM < Thor
 
   desc "status", "Show the current cluster status"
   method_option :config, :default => "/etc/redis-mmm.conf", :required => true, :aliases => "-c"
+  method_option :verbose, :type =>:boolean, :aliases => "-v"
   def status
     puts "Configured hosts"
     hosts.each do |host|
       puts "#{host}: #{host.online? ? "ONLINE" : "OFFLINE"} / #{host.master? ? "master" : "slave"}"
-      puts hosts.inspect
     end
   end
 
   desc "set_master [HOST]", "Changes the master"
   method_option :config, :default => "/etc/redis-mmm.conf", :required => true, :aliases => "-c"
+  method_option :verbose, :type =>:boolean, :aliases => "-v"
   def set_master(host)
     init_state
     change_master_to(host)
@@ -163,6 +169,22 @@ class RedisMMM < Thor
   protected
 
   def init_state
+    if log = (options.log || config.params['log'])
+      $log = Logger.new(log)
+    end
+
+    $log.level = options.verbose || config.params['verbose'] ? Logger::DEBUG : Logger::INFO
+
+    if pidfile = (options.pid || config.params['pid'])
+      File.open(pidfile, "w") do |f|
+        f.write(Process.pid.to_s)
+      end
+
+      at_exit do
+        FileUtils.rm_f(pidfile)
+      end
+    end
+
     @current_master = find_current_master
     $log.info "current master is #{@current_master}"
   end
@@ -322,8 +344,8 @@ class RedisMMM < Thor
     @config ||= ParseConfig.new(options.config)
   end
 
-  def master_ip; config.params[:master_ip]; end
-  def cluster_interface; config.params[:cluster_interface]; end
+  def master_ip; config.params["master_ip"]; end
+  def cluster_interface; config.params["cluster_interface"]; end
 
 
   # returns the hostname of the redis host which currently is master
