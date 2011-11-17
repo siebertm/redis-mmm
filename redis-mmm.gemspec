@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name              = "redis-mmm"
-  s.version           = "0.0.1"
+  s.version           = "0.1.0"
   s.summary           = "Manages a set of redis servers replicating each other"
   s.description       = "Automatic / manual failover"
   s.authors           = ["Michael Siebert"]
