@@ -1,3 +1,11 @@
+== Warning ==
+
+This is an experimental piece of software not yet ready for prime time. I can't guarantee
+consistency for now, since there's no way to make a redis server read only and some redis clients
+seem to ignore crashed servers
+
+Nevertheless, play and try, fork and update and give feedback!
+
 == Moving parts ==
 
 * redis_mmm_mond
