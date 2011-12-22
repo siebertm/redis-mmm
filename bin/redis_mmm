@@ -65,7 +65,7 @@ class RedisMMM < Thor
           :master_link_status => info["master_link_status"],
           :master_last_io_seconds_ago => info["master_last_io_seconds_ago"]
         }
-      rescue Errno::ECONNREFUSED
+      rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH
         {
           :online => false
         }
@@ -73,12 +73,11 @@ class RedisMMM < Thor
     end
 
     def add_ip(ip, interface)
-      $log.debug ssh("ip addr show #{interface} | grep #{ip} || sudo ip addr add #{ip} dev #{interface}")
-
+      $log.debug ssh("ip addr show #{interface} | grep #{ip} || (sudo ip addr add #{ip}/32 dev #{interface}; sudo arping -c 5 -U -s #{ip} -I #{interface} #{ip})")
     end
 
     def remove_ip(ip, interface)
-      $log.debug ssh("ip addr show #{interface} | grep #{ip} && sudo ip addr del #{ip} dev #{interface}")
+      $log.debug ssh("ip addr show #{interface} | grep #{ip} && sudo ip addr del #{ip}/32 dev #{interface}")
     end
 
     def slaveof(host)
@@ -107,6 +106,8 @@ class RedisMMM < Thor
       cmd = "/usr/bin/ssh -p #{ssh_port} #{ssh_user}@#{address} \"#{command}\""
       $log.debug "Executing #{cmd}"
       `#{cmd}`
+    rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH
+      'unreachable'
     end
 
   end
@@ -293,10 +294,10 @@ class RedisMMM < Thor
       return
     end
 
-    $log.info "Changing master from #{@current_master.name} to #{host.name}"
+    $log.info "Changing master from #{@current_master ? @current_master.name : "NONE"} to #{host.name}"
 
     # remove master ip from old master
-    remove_master_ip_from(@current_master)
+    remove_master_ip_from(@current_master) if @current_master
     # add master ip to new master
     add_master_ip_to(host)
     # let new master stop replication
