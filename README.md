@@ -1,6 +1,10 @@
 redis-mmm - redis multi master replication manager
 ==================================================
 
+__IMPORTANT:__ This project is superseeded by redis-sentinel functionality in redis core. Don't use redis-mmm!
+
+
+
 This project is a port of a lot of ideas of mysql-mmm to redis. That also explains the name as an hommage to the mysql-mmm project
 
 Multi-Master?
